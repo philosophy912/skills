@@ -239,6 +239,51 @@ def cmd_report(args) -> int:
     return 0
 
 
+# ---------- 环境检查 ----------
+def cmd_doctor(args) -> int:
+    """检查运行环境：Python 版本、ffmpeg、配置；输出 JSON 供 agent 解析。
+
+    全部就绪返回 0，任一缺失返回 1。ffmpeg 缺失时会附上当前平台的安装命令，
+    方便 agent 直接提示用户手动安装（系统级依赖，本 skill 不自动安装）。
+    """
+    report: dict = {"checks": {}}
+
+    py_ok = sys.version_info >= (3, 10)
+    report["checks"]["python"] = {
+        "ok": py_ok,
+        "version": "%d.%d.%d" % sys.version_info[:3],
+    }
+
+    try:
+        from scripts.extract_frames import find_ffmpeg, ffmpeg_install_hint
+        report["checks"]["ffmpeg"] = {"ok": True, "path": find_ffmpeg()}
+    except FileNotFoundError:
+        report["checks"]["ffmpeg"] = {
+            "ok": False,
+            "install_hint": ffmpeg_install_hint(),
+            "note": "系统级依赖，需手动安装；本 skill 不会自动安装",
+        }
+
+    try:
+        cfg_obj = cfg.load()
+        errs = cfg.validate(cfg_obj)
+        report["checks"]["config"] = {
+            "ok": not errs,
+            "path": str(cfg.config_path()),
+            "litter_box": str(cfg_obj.litter_box_dir),
+            "feeder": str(cfg_obj.feeder_dir),
+            "reports_dir": str(cfg_obj.reports_dir),
+            "timezone": cfg_obj.timezone,
+            "errors": errs,
+        }
+    except Exception as e:
+        report["checks"]["config"] = {"ok": False, "errors": [f"配置加载失败: {e}"]}
+
+    report["ok"] = all(c.get("ok") for c in report["checks"].values())
+    _emit(report)
+    return 0 if report["ok"] else 1
+
+
 # ---------- 入口 ----------
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="cat-video-analyzer",
@@ -267,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     p_rp = sub.add_parser("report", help="聚合并生成报告")
     p_rp.add_argument("--date", required=True)
     p_rp.set_defaults(func=cmd_report)
+
+    p_doc = sub.add_parser("doctor", help="检查运行环境（Python / ffmpeg / 配置）")
+    p_doc.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args(argv)
     return args.func(args)

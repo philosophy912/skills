@@ -34,6 +34,19 @@ _FFMPEG_CANDIDATES = [
 ]
 
 
+def ffmpeg_install_hint() -> str:
+    """返回当前平台安装 ffmpeg 的命令（缺失时用于提示用户手动安装）。"""
+    if sys.platform == "darwin":
+        return "brew install ffmpeg"
+    if sys.platform.startswith("linux"):
+        return ("sudo apt install ffmpeg   # Debian/Ubuntu"
+                "；Fedora: sudo dnf install ffmpeg；Arch: sudo pacman -S ffmpeg")
+    if sys.platform == "win32":
+        return ("winget install Gyan.FFmpeg   # 或 choco install ffmpeg / "
+                "scoop install ffmpeg")
+    return "见 https://ffmpeg.org/download.html"
+
+
 def find_ffmpeg() -> str:
     found = shutil.which("ffmpeg")
     if found:
@@ -42,8 +55,9 @@ def find_ffmpeg() -> str:
         if c and Path(c).exists():
             return c
     raise FileNotFoundError(
-        "找不到 ffmpeg。请安装：macOS `brew install ffmpeg` / "
-        "Linux `apt install ffmpeg` / Windows 见 https://ffmpeg.org/download.html"
+        "找不到 ffmpeg。ffmpeg 是系统级依赖，本 skill 不会自动安装，请手动安装：\n"
+        f"  {ffmpeg_install_hint()}\n"
+        "装好后 ffmpeg 会出现在 PATH 中，重新运行即可。"
     )
 
 
