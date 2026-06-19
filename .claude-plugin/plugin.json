@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "philosophy",
+  "displayName": "Philosophy Skills",
+  "version": "0.1.0",
+  "description": "个人工具集插件：猫咪监控视频行为分析（cat-video-analyzer）+ 维基百科 REST API 查询（wikipedia_restapi）。",
+  "author": {
+    "name": "philosophy"
+  },
+  "license": "MIT",
+  "keywords": ["cat", "video", "wikipedia", "personal", "automation"]
+}

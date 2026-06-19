@@ -1,0 +1,26 @@
+{
+  "skill_name": "cat-video-analyzer",
+  "evals": [
+    {
+      "id": 1,
+      "name": "incremental-rerun-no-rescan",
+      "prompt": "昨天我跑过一次 cat-video-analyzer 分析了 6 月 10 号的猫咪视频，今天发现白天有几个文件漏了没分析。NAS 挂在 /mnt/nas/xiaomi 下，猫砂盆和喂食机各一个目录。帮我补跑一下，注意别把昨天已经分析过的视频重新识别一遍，挺费的。",
+      "expected_output": "agent 应先运行 `run scan --date 2026-06-10`，从输出确认 skipped > 0 且 todo 只含未处理文件；然后只对 todo 里的文件走 extract→识别→ingest；最后 `run report`。绝不对已处理文件重新识别。若 todo 为空应直接去 report。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "first-run-config-guidance",
+      "prompt": "帮我把今天的猫咪视频分析一下。小米摄像头存在 Z 盘 xiaomi 文件夹下，猫砂盆那个目录叫 litter，喂食机叫 feeder。",
+      "expected_output": "agent 应先检查配置（config.toml 的 nas.litter_box / nas.feeder 是否指向有效路径），路径未配置或不存在时引导用户填写（编辑 config.toml 或设环境变量），而不是直接让脚本崩溃。配置就绪后才 scan。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "full-single-file-pipeline",
+      "prompt": "我只想先试一个视频看看效果：/mnt/nas/xiaomi/feeder/20260611_143000.mp4 这个喂食机视频，帮我分析一下里面的吃饭情况，出个报告。",
+      "expected_output": "agent 对单个文件走完整流程：scan（确认它在 todo 里、未被处理）→ extract（抽帧）→ 逐帧读图识别（按 recognition-protocol.md，feeder 场景判断 eating）→ ingest 写回 → report。报告中 eating 事件应来自 feeder 上下文，不应出现 toileting。",
+      "files": []
+    }
+  ]
+}
