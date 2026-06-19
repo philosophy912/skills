@@ -1,7 +1,7 @@
 # Wikipedia REST API 端点表
 
-所有 endpoint 均通过 `scripts/wikipedia_api.sh` 调用。
-完整调用格式：`wikipedia_api.sh <api> <method> <endpoint-name> [path-args...] [-- [curl-args...]]`
+所有 endpoint 均通过 `scripts/wikipedia_api.py` 调用。
+完整调用格式：`wikipedia_api.py <api> <method> <endpoint-name> [path-args...] [-- [curl-args...]]`
 
 > path 参数中的空格请用 `%20` 或 `"` `"` 引用后再传入。query 参数里含空格请用 `--data-urlencode ... -G`。
 

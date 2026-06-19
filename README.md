@@ -44,11 +44,23 @@ claude plugin install philosophy@philosophy-skills
 ln -s "$(pwd)" ~/.claude/skills/philosophy
 ```
 
+## 平台支持
+
+两个 skill 的**所有入口都是 Python**（不依赖 bash），在 **Windows / Linux / macOS 上原生可用**：
+
+| 平台 | 状态 |
+|------|------|
+| Linux / macOS | ✅ 原生 |
+| Windows | ✅ 原生（cmd / PowerShell / Git Bash 均可） |
+
+命令示例统一用 `python3`；Windows 上若 `python3` 不存在（python.org 安装默认只提供 `python`），改用 `python` 即可。
+
 ## 依赖
 
 - **Python ≥ 3.10**（两个 skill 均需）
-- **ffmpeg**：仅 cat-video-analyzer 抽帧需要，须在 `PATH` 中（脚本会自动探测常见安装位置）
-- **curl**：wikipedia_restapi 需要，几乎所有系统自带
+- **ffmpeg**：仅 cat-video-analyzer 抽帧需要，须在 `PATH` 中（脚本会自动探测常见安装位置，含 Windows）
+- **curl**：wikipedia_restapi 需要（Windows 10 1803+ / macOS / Linux 均自带）
+- **无需 bash**：所有入口都是 Python
 - 两个 skill 均通过 Claude 自身的多模态能力 / 网络访问工作，**无需额外 API key**
 
 ## 目录结构
@@ -62,12 +74,12 @@ philosophy/
     ├── cat-video-analyzer/
     │   ├── SKILL.md
     │   ├── references/
-    │   ├── scripts/         # run.py + catva 包装器 + 各子模块
+    │   ├── scripts/         # run.py + catva.py 入口 + 各子模块（Python）
     │   └── evals/
     └── wikipedia_restapi/
         ├── SKILL.md
         ├── references/
-        └── scripts/         # wikipedia_api.sh + setup_config.sh
+        └── scripts/         # wikipedia_api.py + setup_config.py（Python）
 ```
 
 ## 各 skill 配置
@@ -75,7 +87,7 @@ philosophy/
 - **cat-video-analyzer**：首次运行自动生成 `~/.config/cat-video-analyzer/config.toml`
   （Windows 为 `%APPDATA%\cat-video-analyzer\config.toml`），需填入 NAS 上猫砂盆与
   喂食机两个视频目录。报告默认输出到 `~/Documents/cat-reports/`。
-- **wikipedia_restapi**：运行 `setup_config.sh` 生成 `~/.wikipedia_restapi.json`，
+- **wikipedia_restapi**：运行 `setup_config.py` 生成 `~/.wikipedia_restapi.json`，
   配置 HTTP 代理和默认语言（en / zh / ja …）。也可用环境变量 `WIKI_PROXY` /
   `WIKI_LANG` 临时覆盖。
 
