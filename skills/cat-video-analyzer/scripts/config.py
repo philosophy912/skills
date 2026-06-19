@@ -197,10 +197,16 @@ def load() -> Config:
 def validate(cfg: Config) -> list[str]:
     """返回错误信息列表；空列表表示配置可用。"""
     errs: list[str] = []
-    if not cfg.litter_box_dir or not cfg.litter_box_dir.exists():
-        errs.append(f"猫砂盆视频目录不存在或未配置: {cfg.litter_box_dir}")
-    if not cfg.feeder_dir or not cfg.feeder_dir.exists():
-        errs.append(f"喂食机视频目录不存在或未配置: {cfg.feeder_dir}")
+    # Path("") 与 Path(".") 相等且都解析到当前目录，单靠 exists() 无法区分"未配置"，
+    # 故先按路径字符串判空，再检查目录是否存在。
+    if str(cfg.litter_box_dir) == ".":
+        errs.append("猫砂盆视频目录未配置：请在 config.toml 的 [nas] 段填写 litter_box")
+    elif not cfg.litter_box_dir.exists():
+        errs.append(f"猫砂盆视频目录不存在: {cfg.litter_box_dir}")
+    if str(cfg.feeder_dir) == ".":
+        errs.append("喂食机视频目录未配置：请在 config.toml 的 [nas] 段填写 feeder")
+    elif not cfg.feeder_dir.exists():
+        errs.append(f"喂食机视频目录不存在: {cfg.feeder_dir}")
     if cfg.frame_interval_seconds < 1:
         errs.append(f"frame_interval_seconds 必须 ≥ 1，当前 {cfg.frame_interval_seconds}")
     return errs
