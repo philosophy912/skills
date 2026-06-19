@@ -1,0 +1,2 @@
+# skills
+philosophy's skills
