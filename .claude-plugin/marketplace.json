@@ -1,0 +1,21 @@
+{
+  "name": "philosophy-skills",
+  "owner": {
+    "name": "philosophy"
+  },
+  "description": "个人工具集：猫咪监控视频行为分析 + 维基百科 REST API 查询",
+  "plugins": [
+    {
+      "name": "philosophy",
+      "source": "./",
+      "description": "猫咪监控视频行为分析（cat-video-analyzer）+ 维基百科 REST API 查询（wikipedia_restapi）",
+      "version": "0.1.0",
+      "author": {
+        "name": "philosophy"
+      },
+      "license": "MIT",
+      "keywords": ["cat", "video", "wikipedia", "personal", "automation"],
+      "category": "productivity"
+    }
+  ]
+}

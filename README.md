@@ -9,23 +9,39 @@
 
 ## 安装
 
-### 方式一：skills-directory 插件（本地开发，推荐）
+本仓库本身就是一个 Claude Code 插件市场（marketplace），可以直接安装，无需手动克隆或软链。
 
-把本目录放进 Claude Code 的 skills 目录（个人范围，所有项目可用）：
+### 方式一：从 marketplace 安装（推荐）
+
+在 Claude Code 交互式会话中：
+
+```
+/plugin marketplace add philosophy912/skills
+/plugin install philosophy@philosophy-skills
+```
+
+或用 CLI：
+
+```bash
+claude plugin marketplace add philosophy912/skills
+claude plugin install philosophy@philosophy-skills
+```
+
+安装后插件默认启用，两个 skill 自动可用。
+
+之后发布新版本，更新方式：
+
+```
+/plugin marketplace update philosophy-skills
+/plugin update philosophy
+```
+
+### 方式二：本地开发（skills-directory 插件）
+
+适合在本仓库上直接迭代——把仓库软链到 skills 目录，以 `philosophy@skills-dir` 就地加载，改动 `SKILL.md` 即时生效，无需 install：
 
 ```bash
 ln -s "$(pwd)" ~/.claude/skills/philosophy
-```
-
-下次启动 Claude Code 会自动加载为 `philosophy@skills-dir`，无需 install 步骤。
-改动 `SKILL.md` 即时生效；改其它组件（脚本等）需运行 `/reload-plugins`。
-
-### 方式二：通过 marketplace 安装
-
-发布到 marketplace 后：
-
-```bash
-claude plugin install philosophy@<your-marketplace>
 ```
 
 ## 依赖
@@ -40,7 +56,8 @@ claude plugin install philosophy@<your-marketplace>
 ```
 philosophy/
 ├── .claude-plugin/
-│   └── plugin.json          # 插件 manifest
+│   ├── plugin.json          # 插件 manifest
+│   └── marketplace.json     # 自托管市场（本仓库既是插件也是市场）
 └── skills/
     ├── cat-video-analyzer/
     │   ├── SKILL.md
