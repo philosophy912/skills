@@ -20,12 +20,18 @@ SceneContext = Literal["litter_box", "feeder"]
 
 @dataclass
 class FrameResult:
-    """单帧的识别结果。agent 识别完一帧后产出这个结构，由 ingest 写入 jsonl。"""
+    """单帧的识别结果。agent 识别完一帧后产出这个结构，由 ingest 写入 jsonl。
+
+    若该帧是"代表帧"（extract 去重后代表一段相似帧），time_range 标明它覆盖的
+    时间范围 [start, end]；ingest 会据此扩展为多个采样点写回 jsonl，聚合逻辑
+    无需感知去重。None 表示普通单帧。
+    """
 
     frame_ts: str          # ISO8601 带时区，该帧的绝对时间
     context: SceneContext  # 来源：litter_box / feeder
     cats: list[dict]       # [{"identity": "tabby"|"black"|"unknown", "confidence": 0.0-1.0}]
     activity: dict         # {"type": "eating"|"toileting"|"idle"|"absent", "evidence": "..."}
+    time_range: tuple[str, str] | None = None  # 代表帧覆盖的 [start_ts, end_ts]
     raw_text: str = ""     # 可选，agent 的原始备注，便于排查
 
 

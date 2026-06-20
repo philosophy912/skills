@@ -161,6 +161,51 @@ def cmd_scan(args) -> int:
     return 0
 
 
+def _extract_and_dedup(video: Path, context: str, cfg_obj, tz, out_dir=None) -> dict:
+    """抽帧 + 可选去重，返回 frames/out_dir/warnings 等，供 extract / batch-extract 复用。
+
+    去重需 Pillow；缺失或未启用时降级为输出全部帧（skill 仍可用，只是不省 token）。
+    """
+    from scripts import dedup
+
+    od = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="catva_"))
+    frames = extract(video, od, interval_seconds=cfg_obj.frame_interval_seconds)
+    file_start = parse_video_timestamp(video, tz)
+    stamped = [(f, (file_start + timedelta(seconds=f.offset_seconds)).isoformat())
+               for f in frames]
+
+    warnings: list[str] = []
+    payload: list[dict] = []
+
+    if cfg_obj.dedup_enabled and dedup.PILLOW_AVAILABLE:
+        groups = dedup.group_similar([str(f.path) for f in stamped],
+                                     threshold=cfg_obj.dedup_hamming_threshold)
+        for g in groups:
+            rep_f, rep_ts = stamped[g.indices[0]]
+            payload.append({
+                "frame_path": str(rep_f.path),
+                "frame_ts": rep_ts,
+                "context": context,
+                "time_range": [stamped[g.indices[0]][1], stamped[g.indices[-1]][1]],
+                "represents": len(g.indices),
+            })
+    else:
+        if cfg_obj.dedup_enabled and not dedup.PILLOW_AVAILABLE:
+            warnings.append(
+                "Pillow 未安装，跳过帧去重；本次输出全部帧。"
+                "pip install pillow 可启用去重（预计省 40-70% 识别 token）。")
+        for f, ts in stamped:
+            payload.append({"frame_path": str(f.path), "frame_ts": ts, "context": context})
+
+    return {
+        "out_dir": str(od),
+        "frame_count": len(stamped),
+        "representative_count": len(payload),
+        "frames": payload,
+        "warnings": warnings,
+    }
+
+
 def cmd_extract(args) -> int:
     cfg_obj = cfg.load()
     tz = _tz_from_name(cfg_obj.timezone)
@@ -168,18 +213,32 @@ def cmd_extract(args) -> int:
     if not video.exists():
         print(json.dumps({"error": f"视频不存在: {video}"}), file=sys.stderr)
         return 1
-
-    out_dir = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="catva_"))
-    frames = extract(video, out_dir, interval_seconds=cfg_obj.frame_interval_seconds)
-    file_start = parse_video_timestamp(video, tz)
-
-    payload = [{
-        "frame_path": str(f.path),
-        "frame_ts": (file_start + timedelta(seconds=f.offset_seconds)).isoformat(),
-        "context": args.context,
-    } for f in frames]
-    _emit({"video": str(video), "out_dir": str(out_dir), "frames": payload})
+    res = _extract_and_dedup(video, args.context, cfg_obj, tz, out_dir=args.out)
+    _emit({"video": str(video), **res})
     return 0
+
+
+def _expand_frame(fr: FrameResult, interval: int) -> list[FrameResult]:
+    """若 fr 带时间范围（代表帧），按采样间隔扩展为多个时间点写回；否则原样返回。
+
+    这样聚合逻辑无需感知去重——它看到的仍是完整时间序列。
+    """
+    tr = fr.time_range
+    if not tr:
+        return [fr]
+    start = datetime.fromisoformat(tr[0])
+    end = datetime.fromisoformat(tr[1])
+    out = []
+    cur = start
+    while cur <= end:
+        out.append(FrameResult(
+            frame_ts=cur.isoformat(),
+            context=fr.context,
+            cats=fr.cats,
+            activity=fr.activity,
+        ))
+        cur += timedelta(seconds=interval)
+    return out or [fr]
 
 
 def cmd_ingest(args) -> int:
@@ -195,20 +254,28 @@ def cmd_ingest(args) -> int:
     if isinstance(results, dict):
         results = [results]
 
+    interval = cfg_obj.frame_interval_seconds
     frames: list[FrameResult] = []
     errors: list[str] = []
+    expanded = 0
     for i, d in enumerate(results):
         d = _apply_context_constraint(d)
         errs = validate_frame_result(d)
         if errs:
             errors.append(f"第 {i} 条: {'; '.join(errs)}")
             continue
-        frames.append(FrameResult(
+        tr = d.get("time_range")
+        time_range = tuple(tr) if (isinstance(tr, list) and len(tr) == 2) else None
+        fr = FrameResult(
             frame_ts=d["frame_ts"],
             context=d["context"],
             cats=d.get("cats", []),
             activity=d.get("activity", {"type": "idle", "evidence": ""}),
-        ))
+            time_range=time_range,  # type: ignore[arg-type]
+        )
+        grown = _expand_frame(fr, interval)
+        expanded += len(grown) - 1
+        frames.extend(grown)
 
     append_frames(state_dir, args.date, frames)
     state.mark_processed(state_dir, video, result={"frames": len(frames)})
@@ -216,6 +283,8 @@ def cmd_ingest(args) -> int:
         "video": str(video),
         "date": args.date,
         "ingested": len(frames),
+        "representatives": len(results) - len(errors),
+        "expanded_by_dedup": expanded,
         "rejected": len(errors),
         "errors": errors,
     })
@@ -279,9 +348,77 @@ def cmd_doctor(args) -> int:
     except Exception as e:
         report["checks"]["config"] = {"ok": False, "errors": [f"配置加载失败: {e}"]}
 
-    report["ok"] = all(c.get("ok") for c in report["checks"].values())
+    # Pillow：可选依赖，启用帧去重；缺失不阻断流程（extract 自动降级为不去重）
+    try:
+        from scripts.dedup import PILLOW_AVAILABLE, pillow_install_hint
+        if PILLOW_AVAILABLE:
+            import PIL
+            report["checks"]["pillow"] = {
+                "ok": True,
+                "optional": True,
+                "version": getattr(PIL, "__version__", "?"),
+                "purpose": "帧去重（省 40-70% 识别 token）",
+            }
+        else:
+            report["checks"]["pillow"] = {
+                "ok": False,
+                "optional": True,
+                "install_hint": pillow_install_hint(),
+                "note": "可选依赖；缺失时 extract 自动降级为不去重，skill 仍可用",
+            }
+    except Exception as e:
+        report["checks"]["pillow"] = {"ok": False, "optional": True, "errors": [str(e)]}
+
+    # overall 只看必需项（python / ffmpeg / config）；pillow 可选，不计入
+    report["ok"] = all(report["checks"][k].get("ok")
+                       for k in ("python", "ffmpeg", "config"))
     _emit(report)
     return 0 if report["ok"] else 1
+
+
+# ---------- 批量抽帧（并行）----------
+def cmd_batch_extract(args) -> int:
+    """并行对当天所有待处理视频抽帧 + 去重，一次输出全部代表帧。
+
+    用 ThreadPoolExecutor 并发跑 ffmpeg（子进程等待时释放 GIL）。相对逐个
+    extract 加速明显；token 节省来自去重（与 extract 相同的去重逻辑）。
+    """
+    import concurrent.futures
+
+    cfg_obj = cfg.load()
+    tz = _tz_from_name(cfg_obj.timezone)
+    state_dir = cfg.config_dir()
+
+    litter = scan_date(cfg_obj.litter_box_dir, args.date, tz)
+    feeder = scan_date(cfg_obj.feeder_dir, args.date, tz)
+    all_files = [(f, "litter_box") for f in litter] + [(f, "feeder") for f in feeder]
+    todo = state.filter_unprocessed(state_dir, [f for f, _ in all_files], force=False)
+    todo_set = {str(f) for f in todo}
+    targets = [(f, c) for f, c in all_files if str(f) in todo_set]
+
+    results = []
+    if targets:
+        max_workers = min(len(targets), 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            fut_map = {ex.submit(_extract_and_dedup, f, c, cfg_obj, tz): (str(f), c)
+                       for f, c in targets}
+            for fut in concurrent.futures.as_completed(fut_map):
+                vpath, ctx = fut_map[fut]
+                try:
+                    res = fut.result()
+                    results.append({"video": vpath, "context": ctx, **res})
+                except Exception as e:
+                    results.append({"video": vpath, "context": ctx, "error": str(e)})
+
+    results.sort(key=lambda r: (r["video"], r["context"]))
+    _emit({
+        "date": args.date,
+        "videos": len(targets),
+        "frame_count": sum(r.get("frame_count", 0) for r in results),
+        "representative_count": sum(r.get("representative_count", 0) for r in results),
+        "results": results,
+    })
+    return 0
 
 
 # ---------- 入口 ----------
@@ -313,8 +450,13 @@ def main(argv: list[str] | None = None) -> int:
     p_rp.add_argument("--date", required=True)
     p_rp.set_defaults(func=cmd_report)
 
-    p_doc = sub.add_parser("doctor", help="检查运行环境（Python / ffmpeg / 配置）")
+    p_doc = sub.add_parser("doctor", help="检查运行环境（Python / ffmpeg / 配置 / Pillow）")
     p_doc.set_defaults(func=cmd_doctor)
+
+    p_be = sub.add_parser("batch-extract",
+                          help="并行抽帧 + 去重（当天所有待处理视频）")
+    p_be.add_argument("--date", required=True)
+    p_be.set_defaults(func=cmd_batch_extract)
 
     args = ap.parse_args(argv)
     return args.func(args)

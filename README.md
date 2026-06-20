@@ -60,6 +60,7 @@ ln -s "$(pwd)" ~/.claude/skills/philosophy
 - **Python ≥ 3.10**（两个 skill 均需）
 - **ffmpeg**：仅 cat-video-analyzer 抽帧需要，须在 `PATH` 中（脚本会自动探测常见安装位置，含 Windows）
 - **curl**：wikipedia_restapi 需要（Windows 10 1803+ / macOS / Linux 均自带）
+- **Pillow**（可选）：`pip install pillow`，启用 cat-video-analyzer 的**帧去重**（相邻相似帧合并、只识别代表帧），省 40-70% 识别 token；未装时自动降级为不去重，skill 仍可用
 - **无需 bash**：所有入口都是 Python
 - 两个 skill 均通过 Claude 自身的多模态能力 / 网络访问工作，**无需额外 API key**
 

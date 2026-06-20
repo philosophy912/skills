@@ -50,6 +50,8 @@ DEFAULT_CONFIG = {
     "processing": {
         "frame_interval_seconds": 12,
         "event_merge_gap_seconds": 30,
+        "dedup_enabled": True,
+        "dedup_hamming_threshold": 5,
     },
     "model": {
         "provider": "anthropic",
@@ -67,6 +69,8 @@ class Config:
     timezone: str = "Asia/Shanghai"
     frame_interval_seconds: int = 12
     event_merge_gap_seconds: int = 30
+    dedup_enabled: bool = True
+    dedup_hamming_threshold: int = 5
     model_provider: str = "anthropic"
     model_name: str = "claude-sonnet-4-6"
     max_concurrency: int = 4
@@ -155,6 +159,9 @@ timezone = "Asia/Shanghai"
 [processing]
 frame_interval_seconds = 12
 event_merge_gap_seconds = 30
+# 帧去重：相邻相似帧合并，只识别代表帧，省 token（需 pip install pillow；缺失时自动降级）
+dedup_enabled = true
+# dHash 汉明距离阈值：相邻帧差异 ≤ 此值则合并。越小越严格（默认 5）
 
 [model]
 provider = "anthropic"
@@ -187,6 +194,8 @@ def load() -> Config:
         timezone=output.get("timezone", "Asia/Shanghai"),
         frame_interval_seconds=int(proc.get("frame_interval_seconds", 12)),
         event_merge_gap_seconds=int(proc.get("event_merge_gap_seconds", 30)),
+        dedup_enabled=bool(proc.get("dedup_enabled", True)),
+        dedup_hamming_threshold=int(proc.get("dedup_hamming_threshold", 5)),
         model_provider=model.get("provider", "anthropic"),
         model_name=model.get("name", "claude-sonnet-4-6"),
         max_concurrency=int(model.get("max_concurrency", 4)),
