@@ -73,11 +73,17 @@ def extract(
     *,
     interval_seconds: float = 12.0,
     ffmpeg: str | None = None,
+    max_side: int | None = None,
 ) -> list[ExtractedFrame]:
     """抽帧。
 
     返回按 offset 升序排列的帧列表。out_dir 会被创建。
     interval_seconds=12 意味着每 12 秒一帧；1 分钟视频 → 约 5 帧。
+
+    max_side：代表帧长边像素上限。>0 时在抽帧同时用 ffmpeg scale 降采样
+    （长边 ≤ max_side，短边按比例），单帧 token 下降约 (max_side/原长边)² 倍。
+    None 或 0 表示不降采样（保留原生分辨率）。降采样在解码时零成本完成，
+    不增加依赖；agent 读到的就是缩小后的图。
     """
     ffmpeg = ffmpeg or find_ffmpeg()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -86,12 +92,18 @@ def extract(
     fps = 1.0 / float(interval_seconds)
     pattern = str(out_dir / "frame_%06d.jpg")
 
+    # 视频滤镜：抽帧 + 可选降采样。scale 用 min(max_side, iw) 避免把小图放大；
+    # -2 保证短边为偶数（JPEG/YUV 要求）。
+    vf = f"fps={fps}"
+    if max_side and max_side > 0:
+        vf += f",scale='min({int(max_side)},iw)':-2"
+
     cmd = [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "error",
         "-i", str(video_path),
-        "-vf", f"fps={fps}",
+        "-vf", vf,
         "-q:v", "3",            # JPEG 质量（2-5 视觉好，体积适中）
         "-y",                   # 覆盖
         pattern,
@@ -127,8 +139,10 @@ if __name__ == "__main__":
     ap.add_argument("video", type=Path)
     ap.add_argument("--out", type=Path, default=Path("./frames_out"))
     ap.add_argument("--interval", type=float, default=12.0)
+    ap.add_argument("--max-side", type=int, default=None,
+                    help="代表帧长边像素上限（0/省略 = 不降采样）")
     a = ap.parse_args()
-    fs = extract(a.video, a.out, interval_seconds=a.interval)
+    fs = extract(a.video, a.out, interval_seconds=a.interval, max_side=a.max_side)
     print(f"抽出 {len(fs)} 帧到 {a.out}")
     for f in fs[:3]:
         print(f"  {f.path.name} @ {f.offset_seconds:.1f}s")

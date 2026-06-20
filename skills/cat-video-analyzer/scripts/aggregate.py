@@ -12,8 +12,8 @@
 1. 按时间排序帧。
 2. 同一 activity.type 连续出现，合并为一个候选事件。
 3. 两个同类候选事件间隔 < event_merge_gap_seconds（默认 30s）→ 合并。
-4. 事件最短持续时长过滤：默认要求至少覆盖 2 帧（约 ≥ 12s），少于则丢弃，
-   避免把模型偶发的误判固化成事件。
+4. 事件最短帧数过滤：默认按场景分段——猫砂盆 1 帧（救黑猫 <24s 快速进出），
+   喂食机 2 帧（过滤单帧误判）。少于则丢弃，避免把模型偶发的误判固化成事件。
 5. 参与的猫 identity：取事件内出现频次最高的那个；频次相同取置信度最高。
 """
 from __future__ import annotations
@@ -83,12 +83,21 @@ def aggregate(
     frames: Iterable[FrameResult],
     *,
     merge_gap_seconds: float = 30.0,
-    min_frames: int = 2,
+    min_frames: int | dict = 2,
 ) -> list[CatEvent]:
-    """主聚合入口。"""
+    """主聚合入口。
+
+    min_frames：单一整数（所有 context 统一）或 {context: n} 映射（按场景分段，
+    用于「猫砂盆 1 帧兜底快速进出、喂食机 2 帧过滤误判」）。
+    """
     ordered = sorted(frames, key=lambda f: f.frame_ts)
     if not ordered:
         return []
+
+    def _min_for(ctx: str) -> int:
+        if isinstance(min_frames, dict):
+            return int(min_frames.get(ctx, min_frames.get("feeder", 2)))
+        return int(min_frames)
 
     # 1) 按 activity.type 切连续段
     segments: list[list[FrameResult]] = []
@@ -116,7 +125,9 @@ def aggregate(
     events: list[CatEvent] = []
     for a_type, cands in by_type.items():
         for seg in _merge_candidates(cands, merge_gap_seconds):
-            if len(seg) < min_frames:
+            # 最短帧数按该段所属 context 取（段内 context 理论一致，取首帧）
+            ctx = seg[0].context
+            if len(seg) < _min_for(ctx):
                 continue
             start = _to_dt(seg[0].frame_ts)
             end = _to_dt(seg[-1].frame_ts)

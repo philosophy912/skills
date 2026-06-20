@@ -6,11 +6,12 @@
 所以流程不能是"一键黑盒"——中间有一步要 agent 介入（看图、判断、回传结果）。
 把流程拆成子命令，agent 可以逐步驱动：
 
-    scan     扫描 + 增量去重 → 输出待处理文件清单
-    extract  对单个视频抽帧 → 输出帧路径 + 时间戳
+    scan       扫描 + 增量去重 → 输出待处理文件清单
+    prefilter  运动检测预筛 → 砍掉无运动段，输出有运动段清单（省 token 最大杠杆）
+    extract    对单个视频抽帧 → 输出帧路径 + 时间戳（按 context 取采样间隔 + 降采样）
     （agent 读图识别，按 references/recognition-protocol.md）
-    ingest   把 agent 的识别结果写入 raw/日期.jsonl + 标记文件已处理
-    report   聚合当日全部帧 → 生成 Markdown 报告
+    ingest     把 agent 的识别结果写入 raw/日期.jsonl + 标记文件已处理
+    report     聚合当日全部帧 → 生成 Markdown 报告
 
 所有命令通过 stdout 输出 JSON，方便 agent 解析。
 """
@@ -162,14 +163,18 @@ def cmd_scan(args) -> int:
 
 
 def _extract_and_dedup(video: Path, context: str, cfg_obj, tz, out_dir=None) -> dict:
-    """抽帧 + 可选去重，返回 frames/out_dir/warnings 等，供 extract / batch-extract 复用。
+    """抽帧 + 降采样 + 可选去重，返回 frames/out_dir/warnings 等，供 extract / batch-extract 复用。
 
+    采样间隔按 context 取（猫砂盆 6s / 喂食机 12s）；代表帧按 frame_max_side 降采样。
     去重需 Pillow；缺失或未启用时降级为输出全部帧（skill 仍可用，只是不省 token）。
     """
     from scripts import dedup
 
+    interval = cfg_obj.interval_for(context)
     od = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="catva_"))
-    frames = extract(video, od, interval_seconds=cfg_obj.frame_interval_seconds)
+    frames = extract(video, od,
+                     interval_seconds=interval,
+                     max_side=cfg_obj.frame_max_side or None)
     file_start = parse_video_timestamp(video, tz)
     stamped = [(f, (file_start + timedelta(seconds=f.offset_seconds)).isoformat())
                for f in frames]
@@ -178,7 +183,7 @@ def _extract_and_dedup(video: Path, context: str, cfg_obj, tz, out_dir=None) -> 
     payload: list[dict] = []
 
     if cfg_obj.dedup_enabled and dedup.PILLOW_AVAILABLE:
-        groups = dedup.group_similar([str(f.path) for f in stamped],
+        groups = dedup.group_similar([str(f.path) for f, _ in stamped],
                                      threshold=cfg_obj.dedup_hamming_threshold)
         for g in groups:
             rep_f, rep_ts = stamped[g.indices[0]]
@@ -201,6 +206,7 @@ def _extract_and_dedup(video: Path, context: str, cfg_obj, tz, out_dir=None) -> 
         "out_dir": str(od),
         "frame_count": len(stamped),
         "representative_count": len(payload),
+        "interval_seconds": interval,
         "frames": payload,
         "warnings": warnings,
     }
@@ -254,7 +260,8 @@ def cmd_ingest(args) -> int:
     if isinstance(results, dict):
         results = [results]
 
-    interval = cfg_obj.frame_interval_seconds
+    # 扩展代表帧时按「该结果所属 context」的采样间隔（猫砂盆 6s / 喂食机 12s）。
+    # ingest 一次可能收多个 context 的结果，每条各自取间隔。
     frames: list[FrameResult] = []
     errors: list[str] = []
     expanded = 0
@@ -273,6 +280,7 @@ def cmd_ingest(args) -> int:
             activity=d.get("activity", {"type": "idle", "evidence": ""}),
             time_range=time_range,  # type: ignore[arg-type]
         )
+        interval = cfg_obj.interval_for(d["context"])
         grown = _expand_frame(fr, interval)
         expanded += len(grown) - 1
         frames.extend(grown)
@@ -296,7 +304,8 @@ def cmd_report(args) -> int:
     state_dir = cfg.config_dir()
     all_frames = load_frames(state_dir, args.date)
     events = aggregate(all_frames,
-                       merge_gap_seconds=cfg_obj.event_merge_gap_seconds)
+                       merge_gap_seconds=cfg_obj.event_merge_gap_seconds,
+                       min_frames=cfg_obj.min_frames)
     out = write_report(cfg_obj.reports_dir, args.date, events,
                        processed_files=0, skipped_files=0)
     _emit({
@@ -306,6 +315,101 @@ def cmd_report(args) -> int:
         "report_path": str(out),
     })
     return 0
+
+
+# ---------- 运动检测预筛 ----------
+def cmd_prefilter(args) -> int:
+    """批量运动检测预筛：判定当天 todo 里每段视频「有没有动过」。
+
+    - 有运动 → 进 motion_videos 清单，交给后续 extract + 识别。
+    - 无运动 → 在 state 标记 tag="silent"，不写 jsonl、不进识别管线。
+      （absent 帧本就不参与事件，静默跳过不损失数据。）
+
+    --recheck-silent：只复检上轮判为 silent 的段（调阈值时用），不动已识别段。
+    输出 JSON：motion_videos / skipped_silent / thresholds 等。
+    """
+    import concurrent.futures
+    from scripts import prefilter
+
+    if not prefilter.PILLOW_AVAILABLE:
+        print(json.dumps({
+            "error": "预筛需要 Pillow（pip install pillow）。连续录像场景下预筛是"
+                     "必需步骤——否则每段都送模型识别会导致 token 爆炸。",
+        }), file=sys.stderr)
+        return 1
+
+    cfg_obj = cfg.load()
+    tz = _tz_from_name(cfg_obj.timezone)
+    state_dir = cfg.config_dir()
+
+    if args.recheck_silent:
+        # 只复检 silent 段：把它们从 state 里「摘出来」重新判定
+        silent = state.silent_paths(state_dir)
+        targets = [(Path(p), _context_for_path(p, cfg_obj)) for p in silent
+                   if Path(p).exists()]
+        # 复检前先清掉这些段的 silent 标记，让重判能落地
+        state.clear_silent(state_dir, silent)
+    else:
+        litter = scan_date(cfg_obj.litter_box_dir, args.date, tz)
+        feeder = scan_date(cfg_obj.feeder_dir, args.date, tz)
+        all_files = [(f, "litter_box") for f in litter] + [(f, "feeder") for f in feeder]
+        todo = state.filter_unprocessed(state_dir, [f for f, _ in all_files], force=False)
+        todo_set = {str(f) for f in todo}
+        targets = [(f, c) for f, c in all_files if str(f) in todo_set]
+
+    motion_videos: list[dict] = []
+    skipped_silent = 0
+    errors: list[dict] = []
+    if targets:
+        max_workers = min(len(targets), 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            fut_map = {ex.submit(prefilter.detect_motion, f,
+                                 threshold=cfg_obj.motion_threshold): (str(f), c)
+                       for f, c in targets}
+            for fut in concurrent.futures.as_completed(fut_map):
+                vpath, ctx = fut_map[fut]
+                try:
+                    mr = fut.result()
+                except Exception as e:
+                    errors.append({"video": vpath, "error": str(e)})
+                    continue
+                if mr.has_motion:
+                    motion_videos.append({"path": vpath, "context": ctx,
+                                          "max_diff": mr.max_diff})
+                else:
+                    state.mark_processed(state_dir, Path(vpath),
+                                         result={"reason": "silent", "max_diff": mr.max_diff},
+                                         tag="silent")
+                    skipped_silent += 1
+
+    motion_videos.sort(key=lambda r: (r["path"], r["context"]))
+    _emit({
+        "date": args.date,
+        "recheck_silent": bool(args.recheck_silent),
+        "candidates": len(targets),
+        "motion_count": len(motion_videos),
+        "skipped_silent": skipped_silent,
+        "motion_threshold": cfg_obj.motion_threshold,
+        "motion_videos": motion_videos,
+        "errors": errors,
+    })
+    return 0 if not errors else 1
+
+
+def _context_for_path(path_str: str, cfg_obj) -> str:
+    """根据路径所属目录推断 context（litter_box / feeder）。"""
+    p = Path(path_str)
+    try:
+        lb = cfg_obj.litter_box_dir.resolve()
+        fd = cfg_obj.feeder_dir.resolve()
+        cur = p.resolve()
+    except Exception:
+        return "feeder"
+    if str(cur).startswith(str(lb)):
+        return "litter_box"
+    if str(cur).startswith(str(fd)):
+        return "feeder"
+    return "feeder"
 
 
 # ---------- 环境检查 ----------
@@ -454,9 +558,16 @@ def main(argv: list[str] | None = None) -> int:
     p_doc.set_defaults(func=cmd_doctor)
 
     p_be = sub.add_parser("batch-extract",
-                          help="并行抽帧 + 去重（当天所有待处理视频）")
+                          help="并行抽帧 + 降采样 + 去重（当天所有待处理视频）")
     p_be.add_argument("--date", required=True)
     p_be.set_defaults(func=cmd_batch_extract)
+
+    p_pf = sub.add_parser("prefilter",
+                          help="运动检测预筛：砍掉无运动段，输出有运动段清单")
+    p_pf.add_argument("--date", required=True)
+    p_pf.add_argument("--recheck-silent", action="store_true",
+                      help="只复检上轮判为 silent 的段（调阈值时用）")
+    p_pf.set_defaults(func=cmd_prefilter)
 
     args = ap.parse_args(argv)
     return args.func(args)

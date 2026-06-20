@@ -44,6 +44,7 @@ class FileRecord:
     size: int
     processed_at: str
     result: dict | None = None  # 预留：每文件的识别/聚合摘要
+    tag: str | None = None      # 处理方式标记，如 "silent"（预筛判为无运动，静默跳过）
 
 
 def state_path(config_dir: Path) -> Path:
@@ -111,8 +112,14 @@ def mark_processed(
     config_dir: Path,
     p: Path,
     result: dict | None = None,
+    *,
+    tag: str | None = None,
 ) -> None:
-    """把文件标记为已处理。读改写全程持锁。"""
+    """把文件标记为已处理。读改写全程持锁。
+
+    tag：处理方式标记。预筛判为「无运动」的段用 tag="silent" 标记——它们不进
+    识别管线、不写 jsonl，但仍要标记，否则下次 scan 又会重列、预筛白跑。
+    """
     mtime, size = fingerprint(p)
     rec = FileRecord(
         path=str(p),
@@ -120,11 +127,41 @@ def mark_processed(
         size=size,
         processed_at=datetime.now(timezone.utc).isoformat(),
         result=result,
+        tag=tag,
     )
     with file_lock(state_path(config_dir)):
         data = _read_unlocked(state_path(config_dir))
         data["records"][str(p)] = asdict(rec)
         _write_unlocked(state_path(config_dir), data)
+
+
+def silent_paths(config_dir: Path) -> set[str]:
+    """返回所有被预筛标记为 silent（无运动）的文件路径。
+
+    供 prefilter --recheck-silent 使用：只复检这些段，不动已识别的运动段。
+    """
+    data = load(config_dir)
+    return {k for k, v in data.get("records", {}).items()
+            if v.get("tag") == "silent"}
+
+
+def clear_silent(config_dir: Path, paths: Iterable[str]) -> int:
+    """从 state 中移除指定 silent 记录，使其重新进入待处理。返回移除条数。
+
+    供 prefilter --recheck-silent 复检前清场：把上轮判为 silent 的段摘出来重判。
+    持锁读改写。只删 tag=="silent" 的，避免误删真正识别过的记录。
+    """
+    targets = set(paths)
+    removed = 0
+    with file_lock(state_path(config_dir)):
+        data = _read_unlocked(state_path(config_dir))
+        for k in list(data.get("records", {}).keys()):
+            if k in targets and data["records"][k].get("tag") == "silent":
+                del data["records"][k]
+                removed += 1
+        if removed:
+            _write_unlocked(state_path(config_dir), data)
+    return removed
 
 
 def filter_unprocessed(

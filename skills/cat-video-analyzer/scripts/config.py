@@ -21,8 +21,15 @@ reports_dir = "/path/to/reports"
 timezone    = "Asia/Shanghai"
 
 [processing]
-frame_interval_seconds = 12   # 每 N 秒抽一帧
+# 采样间隔：可写单一整数（两个 context 都用它），也可按场景分段
+# 分段写法用于「猫砂盆收到 6s 救黑猫 <24s 快速进出、喂食机保持 12s」
+frame_interval_seconds.litter_box = 6
+frame_interval_seconds.feeder     = 12
 event_merge_gap_seconds = 30  # 同一行为间隔小于此值则合并
+frame_max_side = 768          # 代表帧长边像素上限；降采样省 6x token（见 references）
+min_frames.litter_box = 1     # 猫砂盆单帧 toileting 也记录（快速进出兜底）
+min_frames.feeder     = 2     # 喂食机要求连续 2 帧才成事件
+motion_threshold = 2.0        # 预筛：32x32 灰度相邻帧平均像素差 > 此值判定有运动
 
 [model]
 provider    = "anthropic"     # 目前只实现 anthropic
@@ -48,10 +55,13 @@ DEFAULT_CONFIG = {
         "timezone": "Asia/Shanghai",
     },
     "processing": {
-        "frame_interval_seconds": 12,
+        "frame_interval_seconds": {"litter_box": 6, "feeder": 12},
         "event_merge_gap_seconds": 30,
         "dedup_enabled": True,
         "dedup_hamming_threshold": 5,
+        "frame_max_side": 768,
+        "min_frames": {"litter_box": 1, "feeder": 2},
+        "motion_threshold": 2.0,
     },
     "model": {
         "provider": "anthropic",
@@ -61,20 +71,63 @@ DEFAULT_CONFIG = {
 }
 
 
+def _resolve_interval(raw) -> dict[str, int]:
+    """采样间隔归一化为 {context: seconds}。
+
+    兼容两种写法：单一整数（两个 context 都用它）或 {litter_box, feeder} 表。
+    """
+    default = {"litter_box": 12, "feeder": 12}
+    if isinstance(raw, dict):
+        out = dict(default)
+        out["litter_box"] = int(raw.get("litter_box", default["litter_box"]))
+        out["feeder"] = int(raw.get("feeder", default["feeder"]))
+        return out
+    if isinstance(raw, (int, float)):
+        n = int(raw)
+        return {"litter_box": n, "feeder": n}
+    return default
+
+
+def _resolve_min_frames(raw) -> dict[str, int]:
+    """min_frames 归一化为 {context: n}，兼容单一整数或表。"""
+    default = {"litter_box": 1, "feeder": 2}
+    if isinstance(raw, dict):
+        out = dict(default)
+        out["litter_box"] = int(raw.get("litter_box", default["litter_box"]))
+        out["feeder"] = int(raw.get("feeder", default["feeder"]))
+        return out
+    if isinstance(raw, (int, float)):
+        n = int(raw)
+        return {"litter_box": n, "feeder": n}
+    return default
+
+
 @dataclass
 class Config:
     litter_box_dir: Path = Path()
     feeder_dir: Path = Path()
     reports_dir: Path = Path.home() / "Documents" / "cat-reports"
     timezone: str = "Asia/Shanghai"
-    frame_interval_seconds: int = 12
+    # 采样间隔：按 context 分段（猫砂盆 6s 救快速进出，喂食机 12s）
+    frame_interval_seconds: dict = field(default_factory=lambda: {"litter_box": 6, "feeder": 12})
     event_merge_gap_seconds: int = 30
     dedup_enabled: bool = True
     dedup_hamming_threshold: int = 5
+    frame_max_side: int = 768            # 代表帧长边上限，降采样省 token
+    min_frames: dict = field(default_factory=lambda: {"litter_box": 1, "feeder": 2})
+    motion_threshold: float = 2.0        # 预筛运动检测阈值
     model_provider: str = "anthropic"
     model_name: str = "claude-sonnet-4-6"
     max_concurrency: int = 4
     raw: dict = field(default_factory=dict)
+
+    def interval_for(self, context: str) -> int:
+        """取某 context 的采样间隔（秒）。未知 context 回退 feeder。"""
+        return int(self.frame_interval_seconds.get(context, self.frame_interval_seconds.get("feeder", 12)))
+
+    def min_frames_for(self, context: str) -> int:
+        """取某 context 的最短帧数。未知 context 回退 feeder。"""
+        return int(self.min_frames.get(context, self.min_frames.get("feeder", 2)))
 
 
 def config_dir() -> Path:
@@ -110,7 +163,8 @@ def _load_toml(path: Path) -> dict:
     if tomllib is not None:
         with path.open("rb") as f:
             return tomllib.load(f)
-    # 极简 fallback：只支持 key = "value" / 数字，够配置用
+    # 极简 fallback：只支持 key = "value" / 数字 / bool，够配置用。
+    # 支持 dotted key（如 frame_interval_seconds.litter_box = 6）→ 嵌套 dict。
     parsed: dict = {}
     section = parsed
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -126,14 +180,23 @@ def _load_toml(path: Path) -> dict:
         k, v = line.split("=", 1)
         k, v = k.strip(), v.strip()
         if v.startswith('"') and v.endswith('"'):
-            section[k] = v[1:-1]
+            val: object = v[1:-1]
         elif v.lower() in ("true", "false"):
-            section[k] = v.lower() == "true"
+            val = v.lower() == "true"
         else:
             try:
-                section[k] = int(v)
+                val = int(v)
             except ValueError:
-                section[k] = float(v) if "." in v else v
+                val = float(v) if "." in v else v
+        # dotted key → 嵌套 dict（a.b.c = v → {a: {b: {c: v}}}）
+        if "." in k:
+            parts = k.split(".")
+            node = section
+            for p in parts[:-1]:
+                node = node.setdefault(p, {})
+            node[parts[-1]] = val
+        else:
+            section[k] = val
     return parsed
 
 
@@ -157,8 +220,21 @@ reports_dir = ""
 timezone = "Asia/Shanghai"
 
 [processing]
-frame_interval_seconds = 12
+# 采样间隔（秒）：可写单一整数，也可按场景分段。
+# 分段：猫砂盆收 6s 救黑猫 <24s 快速进出，喂食机保持 12s（吃饭是长活动）。
+frame_interval_seconds.litter_box = 6
+frame_interval_seconds.feeder     = 12
 event_merge_gap_seconds = 30
+# 代表帧长边像素上限（ffmpeg scale 降采样）。0 = 不降采样。
+# 768 在 1 tile 内、单帧 token 比 1080p 省 ~6x，且不丢识别细节。
+frame_max_side = 768
+# 事件最短帧数（按场景分段）：单帧活动少于则丢弃。
+# 猫砂盆 = 1（快速进出兜底），喂食机 = 2（过滤单帧误判）。
+min_frames.litter_box = 1
+min_frames.feeder     = 2
+# 预筛运动检测阈值：32x32 灰度相邻帧平均像素差 > 此值判定「有运动」。
+# 太小会把光照噪声判成运动，太大漏掉轻微活动。首跑后按 skipped_silent 占比调。
+motion_threshold = 2.0
 # 帧去重：相邻相似帧合并，只识别代表帧，省 token（需 pip install pillow；缺失时自动降级）
 dedup_enabled = true
 # dHash 汉明距离阈值：相邻帧差异 ≤ 此值则合并。越小越严格（默认 5）
@@ -192,10 +268,13 @@ def load() -> Config:
         feeder_dir=Path(feeder) if feeder else Path(),
         reports_dir=Path(reports_dir) if reports_dir else Path.home() / "Documents" / "cat-reports",
         timezone=output.get("timezone", "Asia/Shanghai"),
-        frame_interval_seconds=int(proc.get("frame_interval_seconds", 12)),
+        frame_interval_seconds=_resolve_interval(proc.get("frame_interval_seconds", DEFAULT_CONFIG["processing"]["frame_interval_seconds"])),
         event_merge_gap_seconds=int(proc.get("event_merge_gap_seconds", 30)),
         dedup_enabled=bool(proc.get("dedup_enabled", True)),
         dedup_hamming_threshold=int(proc.get("dedup_hamming_threshold", 5)),
+        frame_max_side=int(proc.get("frame_max_side", 768)),
+        min_frames=_resolve_min_frames(proc.get("min_frames", DEFAULT_CONFIG["processing"]["min_frames"])),
+        motion_threshold=float(proc.get("motion_threshold", 2.0)),
         model_provider=model.get("provider", "anthropic"),
         model_name=model.get("name", "claude-sonnet-4-6"),
         max_concurrency=int(model.get("max_concurrency", 4)),
@@ -216,8 +295,12 @@ def validate(cfg: Config) -> list[str]:
         errs.append("喂食机视频目录未配置：请在 config.toml 的 [nas] 段填写 feeder")
     elif not cfg.feeder_dir.exists():
         errs.append(f"喂食机视频目录不存在: {cfg.feeder_dir}")
-    if cfg.frame_interval_seconds < 1:
-        errs.append(f"frame_interval_seconds 必须 ≥ 1，当前 {cfg.frame_interval_seconds}")
+    for ctx in ("litter_box", "feeder"):
+        n = cfg.interval_for(ctx)
+        if n < 1:
+            errs.append(f"frame_interval_seconds.{ctx} 必须 ≥ 1，当前 {n}")
+    if cfg.frame_max_side < 0:
+        errs.append(f"frame_max_side 必须 ≥ 0（0 表示不降采样），当前 {cfg.frame_max_side}")
     return errs
 
 

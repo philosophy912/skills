@@ -12,9 +12,12 @@
    ├─ run scan --date D ─────────────► │ 扫描 + 增量去重
    │ ◄────── todo 清单 (JSON) ─────── │
    │                                   │
-   │  对 todo 里每个 video:            │
-   │   ├─ run extract --video V ─────► │ ffmpeg 抽帧
-   │   │ ◄── 帧路径 + 时间戳 ───────── │
+   ├─ run prefilter --date D ────────► │ 运动检测：每段抽 3 帧缩略图做帧差
+   │ ◄── motion_videos + skipped ──── │ 无运动段标记 silent（不写 jsonl）
+   │                                   │
+   │  对 motion_videos 里每个 video:   │
+   │   ├─ run extract --video V ─────► │ ffmpeg 抽帧 + scale 降采样 + 去重
+   │   │ ◄── 代表帧路径 + 时间戳 ───── │
    │   │                                │
    │   ├─ 读图 + 识别（agent 自身）     │  ← 不调脚本，不调 API
    │   │   （按 recognition-protocol）  │
@@ -26,6 +29,21 @@
      ◄── 报告路径 ──────────────────── │
 ```
 
+## token 优化的四个杠杆
+
+连续录像（每分钟一个文件）每天固定 2880 段。多模态 token = 送多少帧 × 每帧多大，
+四个正交杠杆咬合在一起把量级压下来：
+
+| 杠杆 | 作用 | 默认 |
+|------|------|------|
+| **运动检测预筛**（prefilter） | 砍掉无运动段，~2880→~300 段 | `motion_threshold=2.0` |
+| **图像降采样**（extract） | 每帧长边 ≤768，单帧 token ÷6 | `frame_max_side=768` |
+| **采样间隔分段** | 猫砂盆 6s 救黑猫快速进出、喂食机 12s | 见 config |
+| **段内 dHash 去重** | 相邻相似帧合并为代表帧 | `dedup_hamming_threshold=5` |
+
+单帧 token ≈ `宽×高/750`：1080p≈2700，768px≈440。从原始 ~777 万 token/天 压到 ~40 万。
+**去重省的是帧数不是每帧 token**——单靠去重解决不了连续录像的量级问题。
+
 ## 各步骤细节
 
 ### scan（`run scan`）
@@ -35,8 +53,17 @@
 - 读 `state.json` 去重：只返回指纹 `(mtime, size)` 不匹配的文件。
 - `--force` 忽略去重，全量重列。
 
+### prefilter（`run prefilter`）
+- 对 todo 里每个视频抽 3 帧（首 0s / 中 30s / 尾 60s）缩到 32×32 灰度。
+- 算**相邻帧**平均像素差（不用背景帧差——光照渐变在相邻 30s 几乎归零，猫位移是高频仍能捕获）。
+- 差值 > `motion_threshold` → 有运动，进 `motion_videos`；否则标记 `silent`（不写 jsonl，
+  但要标记，否则下次 scan 重列、预筛白跑）。
+- `--recheck-silent`：只复检上轮 silent 段（调阈值时用），不动已识别段。
+- 需 Pillow；连续录像场景下预筛是必需步骤（缺失时 prefilter 直接报错，不静默降级）。
+
 ### extract（`run extract`）
-- 调 ffmpeg 的 `fps=1/interval` 滤镜均匀抽帧（默认 12s/帧）。
+- 调 ffmpeg 的 `fps=1/interval` 滤镜均匀抽帧，间隔**按 context 取**（猫砂盆 6s / 喂食机 12s）。
+- 同时 `scale='min(max_side,iw)':-2` 降采样，agent 读到的就是缩小后的图。
 - 每帧的 `frame_ts` = 视频起始时间（文件名/mtime）+ 帧偏移，由脚本算好，
   agent 不用自己算。
 
@@ -48,12 +75,13 @@
 ### ingest（`run ingest`）
 - 校验每条结果的字段（`schema.validate_frame_result`）。
 - 应用**路径级硬约束**：猫砂盆目录的 `eating` → `idle`，喂食机的 `toileting` → `idle`。
+- 带时间范围的结果按该 context 的采样间隔扩展为多个时间点。
 - 追加到 `raw/日期.jsonl`。
 - `mark_processed`：只有这一步成功，文件才被标记为已处理。
 
 ### report（`run report`）
 - 读 `raw/日期.jsonl` 里**当天全部帧**（跨视频文件）。
-- 全局聚合（见 `aggregation-rules.md`）。
+- 全局聚合（见 `aggregation-rules.md`），`min_frames` 按 context 取（猫砂盆 1 / 喂食机 2）。
 - 生成 `reports_dir/日期.md`。
 
 ## 持久化数据布局
@@ -81,11 +109,13 @@
 
 | 失败点 | 行为 |
 |--------|------|
+| prefilter 判某段无运动 | 标记 silent、不写 jsonl；`--recheck-silent` 可复检 |
 | extract 失败 | 不标记已处理；下次 `scan` 会重新列入 todo |
 | 识别时某帧判断不了 | agent 可对该帧填 `idle`/`unknown`，或整帧不写入 results |
 | ingest 校验失败 | 该条被拒（返回 errors），其余正常写入；视频整体仍标记已处理 |
 | 状态文件损坏 | 自动备份 `.corrupt-*.json` 并重建空状态 |
 | ffmpeg 缺失 | 报错并提示安装方式 |
+| Pillow 缺失 | 去重降级（不省 token）；prefilter 直接报错（必需步骤） |
 
 ## 定时触发
 

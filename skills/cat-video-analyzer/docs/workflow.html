@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cat-video-analyzer · 工作流程</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171d24; --panel2:#1e2630; --ink:#e6edf3;
+    --muted:#8b98a7; --line:#2a3440; --accent:#ff9e64; --accent2:#7ee787;
+    --blue:#79c0ff; --purple:#d2a8ff; --red:#ff7b72;
+    --tabby:#d2a8ff; --black:#9ca3af;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.7; font-size:15px;
+  }
+  a{color:var(--blue); text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{
+    font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.88em;
+    background:#0b0f14; padding:2px 6px; border-radius:4px; color:var(--accent2);
+    border:1px solid var(--line);
+  }
+  pre{
+    background:#0b0f14; border:1px solid var(--line); border-radius:8px;
+    padding:14px 16px; overflow-x:auto; line-height:1.5;
+  }
+  pre code{background:none; border:none; padding:0; color:var(--ink)}
+  .layout{display:flex; min-height:100vh}
+  /* 侧边导航 */
+  nav{
+    width:260px; flex-shrink:0; background:var(--panel);
+    border-right:1px solid var(--line); padding:24px 18px; position:sticky; top:0; height:100vh; overflow-y:auto;
+  }
+  nav .brand{font-size:16px; font-weight:700; color:var(--accent); margin-bottom:4px}
+  nav .brand-sub{font-size:12px; color:var(--muted); margin-bottom:20px}
+  nav a{
+    display:block; color:var(--muted); padding:7px 10px; border-radius:6px; font-size:14px; margin:1px 0;
+  }
+  nav a:hover{background:var(--panel2); color:var(--ink); text-decoration:none}
+  nav a.sub{padding-left:24px; font-size:13px}
+  /* 主区 */
+  main{flex:1; max-width:900px; margin:0 auto; padding:40px 48px 120px}
+  h1{font-size:30px; margin:0 0 8px; border-bottom:1px solid var(--line); padding-bottom:14px}
+  h1 .tag{font-size:13px; color:var(--muted); font-weight:400; display:block; margin-top:6px}
+  h2{font-size:23px; margin:44px 0 14px; color:var(--accent); border-left:3px solid var(--accent); padding-left:10px}
+  h3{font-size:18px; margin:28px 0 10px; color:var(--blue)}
+  h4{font-size:15px; margin:18px 0 8px; color:var(--purple)}
+  p{margin:12px 0}
+  ul,ol{padding-left:22px}
+  li{margin:5px 0}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14px}
+  th,td{border:1px solid var(--line); padding:8px 12px; text-align:left; vertical-align:top}
+  th{background:var(--panel2); color:var(--accent2); font-weight:600}
+  tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+  .lead{color:var(--muted); font-size:16px}
+  /* 角色对照 */
+  .roles{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:18px 0}
+  .role{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px}
+  .role h4{margin:0 0 8px}
+  .role.agent{border-top:3px solid var(--accent)}
+  .role.script{border-top:3px solid var(--blue)}
+  .role.agent h4{color:var(--accent)} .role.script h4{color:var(--blue)}
+  .role ul{margin:6px 0 0; padding-left:18px}
+  /* 流程图 */
+  .flow{display:flex; flex-direction:column; gap:0; margin:24px 0; position:relative}
+  .step{
+    display:flex; align-items:stretch; background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; margin-bottom:0; overflow:hidden;
+  }
+  .step + .step{margin-top:10px}
+  .step .num{
+    flex-shrink:0; width:54px; display:flex; align-items:center; justify-content:center;
+    font-size:22px; font-weight:800; color:var(--bg); background:var(--accent);
+  }
+  .step.s2 .num{background:var(--blue)}
+  .step.s3 .num{background:var(--purple)}
+  .step.s4 .num{background:var(--accent2)}
+  .step.s5 .num{background:var(--red)}
+  .step .body{padding:14px 18px; flex:1}
+  .step .body h4{margin:0 0 4px; color:var(--ink); font-size:16px}
+  .step .body .who{font-size:12px; color:var(--muted); margin-bottom:6px}
+  .step .body .who b{color:var(--accent2)}
+  .arrow{text-align:center; color:var(--line); font-size:18px; line-height:1; margin:2px 0}
+  /* 双泳道图 */
+  .lanes{
+    background:#0b0f14; border:1px solid var(--line); border-radius:10px;
+    padding:20px 22px; margin:20px 0; font-family:monospace; font-size:13px; line-height:1.7; overflow-x:auto; color:var(--ink);
+  }
+  .lanes .lane-head{color:var(--muted); display:grid; grid-template-columns:1fr 1fr; gap:30px; margin-bottom:8px; font-weight:bold}
+  .lanes .row{display:grid; grid-template-columns:1fr 1fr; gap:30px; align-items:center}
+  .lanes .a{color:var(--accent)}
+  .lanes .s{color:var(--blue)}
+  .lanes .center{color:var(--muted); text-align:center; grid-column:1/3}
+  /* callout */
+  .callout{background:rgba(126,231,135,.06); border-left:3px solid var(--accent2); padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0}
+  .callout.warn{background:rgba(255,158,100,.07); border-color:var(--accent)}
+  .callout.warn2{background:rgba(255,123,114,.07); border-color:var(--red)}
+  /* 数据布局 */
+  .tree{font-family:"SF Mono",monospace; font-size:13.5px; line-height:1.8; background:#0b0f14; border:1px solid var(--line); border-radius:8px; padding:16px 20px}
+  .tree .c{color:var(--muted)} .tree .f{color:var(--accent2)} .tree .d{color:var(--blue)}
+  /* cat chips */
+  .chip{display:inline-block; padding:2px 9px; border-radius:11px; font-size:12px; font-weight:600; margin:0 3px}
+  .chip.tabby{background:rgba(210,168,255,.15); color:var(--tabby); border:1px solid rgba(210,168,255,.3)}
+  .chip.black{background:rgba(156,163,175,.15); color:var(--black); border:1px solid rgba(156,163,175,.3)}
+  .pill{display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600}
+  .pill.eat{background:rgba(255,158,100,.15); color:var(--accent)}
+  .pill.toi{background:rgba(121,192,255,.15); color:var(--blue)}
+  .pill.idle{background:rgba(139,152,167,.15); color:var(--muted)}
+  .pill.abs{background:rgba(255,123,114,.12); color:var(--red)}
+  /* 实施状态标记 */
+  .status{display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:600; padding:2px 8px; border-radius:4px; margin-left:6px; vertical-align:middle}
+  .status.done{background:rgba(126,231,135,.15); color:var(--accent2); border:1px solid rgba(126,231,135,.3)}
+  .status.plan{background:rgba(255,158,100,.15); color:var(--accent); border:1px solid rgba(255,158,100,.3)}
+  .statusbar{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 20px; margin:20px 0}
+  .statusbar h3{margin:0 0 10px; color:var(--accent)}
+  .statusbar ul{margin:6px 0 0; padding-left:20px}
+  .statusbar li{margin:6px 0}
+  /* token 账对照表 */
+  .acct{width:100%; border-collapse:collapse; margin:16px 0; font-size:13.5px}
+  .acct th,.acct td{border:1px solid var(--line); padding:9px 12px; text-align:left}
+  .acct th{background:var(--panel2); color:var(--accent2)}
+  .acct td.num{text-align:right; font-family:"SF Mono",monospace}
+  .acct tr.best td{background:rgba(126,231,135,.06); font-weight:600}
+  .acct tr.worst td{background:rgba(255,123,114,.05)}
+  .acct .vs{text-align:right; font-weight:700; color:var(--accent2)}
+  footer{margin-top:60px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:13px}
+  @media (max-width:760px){ nav{display:none} .roles{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav>
+  <div class="brand">🐱 cat-video-analyzer</div>
+  <div class="brand-sub">工作流程文档</div>
+  <a href="#overview">概述</a>
+  <a href="#status">实施状态</a>
+  <a href="#token">token 消耗账</a>
+  <a href="#roles">角色分工</a>
+  <a href="#flow">端到端流程图</a>
+  <a href="#steps">五步详解</a>
+  <a href="#step1" class="sub">1 · scan 扫描</a>
+  <a href="#step-pf" class="sub">1.5 · prefilter 预筛</a>
+  <a href="#step2" class="sub">2 · extract 抽帧</a>
+  <a href="#step3" class="sub">3 · 识别（核心）</a>
+  <a href="#step4" class="sub">4 · ingest 写回</a>
+  <a href="#step5" class="sub">5 · report 报告</a>
+  <a href="#commands">命令速查</a>
+  <a href="#data">数据布局</a>
+  <a href="#dedup">增量去重</a>
+  <a href="#aggregate">聚合规则</a>
+  <a href="#principles">核心原则</a>
+  <a href="#failure">失败与重试</a>
+  <a href="#schedule">定时触发</a>
+</nav>
+
+<main>
+<h1>cat-video-analyzer 工作流程
+  <span class="tag">分析小米摄像头录制的猫咪视频，识别 <span class="chip tabby">狸花猫 tabby</span> <span class="chip black">黑猫 black</span> 在猫砂盆 / 喂食机区域的 <span class="pill eat">吃饭</span> <span class="pill toi">上厕所</span> 行为，按日输出 Markdown 报告</span>
+</h1>
+
+<p class="lead">视频来自小米摄像头（一个拍猫砂盆、一个拍喂食机，每段约 1 分钟），存放在 NAS 上。
+流程不是“一键脚本”——中间的<strong>逐帧识别</strong>由 agent 的多模态能力完成，脚本只做确定性工作
+（扫描、抽帧、去重、聚合、报告）。这样 skill 不绑死任何模型 API，能在任何“能读图 + 能跑 bash”的 agent 上工作。</p>
+
+<div class="callout">
+约定：下文 <code>CATVA</code> 代表
+<code>python3 "${CLAUDE_PLUGIN_ROOT}/skills/cat-video-analyzer/scripts/catva.py"</code>。
+所有子命令通过 stdout 输出 JSON，方便 agent 解析。Windows 上若 <code>python3</code> 不存在，改用 <code>python</code>。
+</div>
+
+<!-- 实施状态 -->
+<section id="status">
+<h2>实施状态</h2>
+<p>本文档描述的流程包含<strong>四个 token 优化杠杆</strong>。下表标注每个杠杆的落地状态——
+<span class="status done">✅ 已实现</span> 表示当前代码已支持，<span class="status done">✅ 已实现</span> 表示已设计但尚未实现。
+文档反映的流程已全部落地实现。</p>
+
+<div class="statusbar">
+<ul>
+  <li><strong>本地运动检测预筛</strong>（新增 <code>prefilter</code> 子命令，砍掉无运动段）<span class="status done">✅ 已实现</span></li>
+  <li><strong>图像降采样</strong>（ffmpeg <code>scale</code> 到长边 768，配置项 <code>frame_max_side</code>）<span class="status done">✅ 已实现</span></li>
+  <li><strong>采样间隔按 context 分段</strong>（猫砂盆 6s / 喂食机 12s，救黑猫快速进出）<span class="status done">✅ 已实现</span></li>
+  <li><strong>段内 dHash 去重</strong>（相邻相似帧合并为代表帧）<span class="status done">✅ 已实现</span></li>
+</ul>
+</div>
+<div class="callout">四个杠杆现已全部落地。降采样后代表帧长边 ≤768（单帧 token ~440），
+预筛砍掉 85%+ 无运动段——从原始每段必送 1 张 1080p 大图的烧爆状态，压到 ~40 万 token/天。</div>
+</section>
+
+<!-- token 账 -->
+<section id="token">
+<h2>token 消耗账（被藏起来的关键账）</h2>
+<p>小米摄像头<strong>连续录像</strong>、NAS 上每分钟一个文件，意味着每天固定 <strong>2880 段</strong>（24h × 2 摄像头 ÷ 1min）。
+多模态识别的 token 取决于两个独立维度：<strong>送多少帧</strong> × <strong>每帧多大</strong>。
+本文档原先只谈前者（帧数），对后者（分辨率）只字未提——而分辨率才是 6–9 倍的杠杆。</p>
+
+<p>单帧 token ≈ <code>宽 × 高 / 750</code>（Claude 视觉）。一张 1920×1080 ≈ <strong>2700 token</strong>，
+降采样到长边 768（768×432）≈ <strong>440 token</strong>，差 <strong>6 倍</strong>。</p>
+
+<table class="acct">
+  <tr><th>方案</th><th>段/天</th><th>代表帧/天</th><th>单帧 token</th><th class="num">总 token/天</th><th class="num">vs 原始</th></tr>
+  <tr class="worst"><td>原始（当前代码）</td><td>2880</td><td>~2880（每段≥1）</td><td>~2700 (1080p)</td><td class="num">~777 万</td><td class="vs">1×</td></tr>
+  <tr><td>+ 预筛</td><td>~300 (15%)</td><td>~750</td><td>~2700</td><td class="num">~200 万</td><td class="vs">3.9×</td></tr>
+  <tr><td>+ 预筛 + 降采样</td><td>~300</td><td>~750</td><td>~440 (768px)</td><td class="num">~33 万</td><td class="vs">23×</td></tr>
+  <tr class="best"><td>+ 预筛 + 降采样 + 猫砂盆6s</td><td>~300</td><td>~900</td><td>~440</td><td class="num">~40 万</td><td class="vs">19×</td></tr>
+</table>
+
+<p>从一天近千万 token、上百美金，压到 ~40 万 token、个位数美金。注意：dHash 去重（已实现的那项）省的是<strong>帧数</strong>，
+在这张表里几乎不占行——它无法独立解决连续录像的量级问题，必须和预筛、降采样配合。</p>
+</section>
+
+<!-- 角色 -->
+<section id="roles">
+<h2>角色分工</h2>
+<div class="roles">
+  <div class="role agent">
+    <h4>🤖 Agent（执行者是你）</h4>
+    <ul>
+      <li>用多模态读图能力打开代表帧</li>
+      <li>按 <code>recognition-protocol.md</code> 判断猫身份 + 行为</li>
+      <li>产出结构化 <code>FrameResult</code> JSON</li>
+      <li>编排整条流程：scan → extract → 识别 → ingest → report</li>
+    </ul>
+  </div>
+  <div class="role script">
+    <h4>⚙️ Scripts（确定性工作）</h4>
+    <ul>
+      <li>扫描 NAS 目录、按文件名解析时间戳</li>
+      <li>ffmpeg 抽帧 + dHash 去重</li>
+      <li>校验 schema、应用路径级硬约束</li>
+      <li>把结果写入 jsonl、标记已处理</li>
+      <li>跨视频全局聚合、渲染 Markdown 报告</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- 流程总览 -->
+<section id="flow">
+<h2>端到端流程图</h2>
+<p>左栏是 agent 的动作，右栏是 scripts 的动作，箭头表示数据流向。
+预筛是连续录像下省 token 的最大杠杆。</p>
+<div class="lanes">
+  <div class="lane-head"><span>agent</span><span>scripts</span></div>
+  <div class="row">
+    <div class="a">run scan --date D ────────────►</div>
+    <div class="s">扫描 + 增量去重</div>
+  </div>
+  <div class="row">
+    <div class="a">◄──── todo 清单 (JSON) ──────</div>
+    <div class="s">state.json 指纹比对</div>
+  </div>
+  <div class="row">
+    <div class="a">run prefilter --date D ──────► <span class="status done">✅</span></div>
+    <div class="s">每段抽 3 帧 32×32 缩略图做相邻帧差</div>
+  </div>
+  <div class="row">
+    <div class="a">◄── 有运动段清单 + 静默跳过数 ─</div>
+    <div class="s">无运动段标记 silent 但不写 jsonl</div>
+  </div>
+  <div class="center">─ 仅对「有运动」的段重复 2~4 步 ─</div>
+  <div class="row">
+    <div class="a">run extract --video V ───────►</div>
+    <div class="s">ffmpeg 抽帧 + scale 降采样 + 去重</div>
+  </div>
+  <div class="row">
+    <div class="a">◄── 代表帧路径 + time_range ──</div>
+    <div class="s">dHash 合并相邻相似帧</div>
+  </div>
+  <div class="row">
+    <div class="a">读图 + 识别（自身能力）</div>
+    <div class="s" style="color:var(--muted)">（不调脚本，不调 API）</div>
+  </div>
+  <div class="row">
+    <div class="a">run ingest --results ... ────►</div>
+    <div class="s">校验 + 扩展 + 写 jsonl</div>
+  </div>
+  <div class="row">
+    <div class="a">◄──── 确认 ──────────────────</div>
+    <div class="s">mark_processed</div>
+  </div>
+  <div class="center">─ 全部有运动段处理完 ─</div>
+  <div class="row">
+    <div class="a">run report --date D ─────────►</div>
+    <div class="s">全局聚合 + 渲染 Markdown</div>
+  </div>
+  <div class="row">
+    <div class="a">◄── reports_dir/日期.md ─────</div>
+    <div class="s">从 raw/日期.jsonl 重聚合</div>
+  </div>
+</div>
+</section>
+
+<!-- 五步详解 -->
+<section id="steps">
+<h2>流程详解</h2>
+
+<div class="flow">
+  <div class="step s1" id="step1">
+    <div class="num">1</div>
+    <div class="body">
+      <h4>scan · 扫描当天待处理文件</h4>
+      <div class="who">执行者：<b>scripts</b> · agent 仅发起调用</div>
+      <pre><code>CATVA scan --date 2026-06-11</code></pre>
+      <p>递归扫描 <code>nas.litter_box</code> / <code>nas.feeder</code>，从文件名解析时间戳（支持
+      <code>20260611_143000</code>、<code>2026-06-11_14-30-00</code> 等，失败回退 mtime），
+      按 <code>--date</code> 过滤；读 <code>state.json</code> 做增量去重，只返回指纹
+      <code>(mtime, size)</code> 不匹配的文件。</p>
+      <p>输出 JSON：<code>todo</code> 为当天且<strong>尚未处理</strong>的视频清单（每项含
+      <code>path</code> 和 <code>context</code>），<code>skipped</code> 为已处理被跳过的数量。
+      <code>--force</code> 可忽略去重全量重列。</p>
+      <div class="callout warn">todo 为空且 skipped &gt; 0 → 当天都处理过了，直接跳到第 5 步出报告。</div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="step s1" id="step-pf">
+    <div class="num">1.5</div>
+    <div class="body">
+      <h4>prefilter · 运动检测预筛 <span class="status done">✅ 已实现</span></h4>
+      <div class="who">执行者：<b>scripts</b> · ffmpeg + Pillow · 纯本地，不送模型</div>
+      <pre><code>CATVA prefilter --date 2026-06-11
+# 调阈值后只复检上轮判为无运动的段：
+CATVA prefilter --date 2026-06-11 --recheck-silent</code></pre>
+      <p><strong>连续录像下省 token 的最大杠杆</strong>。对 <code>todo</code> 里每个视频，用 ffmpeg
+      极低帧率抽 3 帧（首 0s / 中 30s / 尾 60s），缩到 32×32 灰度，算<strong>相邻帧平均像素差</strong>。</p>
+      <ul>
+        <li>差值 ≤ 阈值 → 判定「整段静止」<strong>不进识别管线、不写 jsonl</strong>，但在 <code>state.json</code> 标记 <code>silent</code>（否则下次 <code>scan</code> 又重列，预筛白跑）</li>
+        <li>差值 &gt; 阈值 → 进「有运动」清单，交给后续 extract + 识别</li>
+      </ul>
+      <p>用相邻帧差而非对背景帧差：光照渐变是低频全局变化，相邻 30s 几乎归零；猫的位移是高频局部变化仍能捕获——故红外夜视渐变不会把空场景误判成有运动。</p>
+      <div class="callout">输出 JSON：<code>motion_videos</code>（有运动段清单）、<code>skipped_silent</code>（静默跳过数）。典型连续录像下静默跳过 85%+ 的段——这是从 2880 段/天 砍到 ~300 段/天 的关键。</div>
+      <div class="callout warn">漏检边界：3 帧采样间隔 30s，理论上漏 &lt; 30s 的瞬时活动。但猫吃饭/上厕所单次 ≥ 1–2 分钟，且聚合阶段 30s 间隔容忍会补回。<code>--recheck-silent</code> 只重判上轮 <code>silent</code> 段，调阈值时不影响已识别的运动段。</div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="step s2" id="step2">
+    <div class="num">2</div>
+    <div class="body">
+      <h4>extract · 抽帧 + 降采样 + 去重（输出代表帧）</h4>
+      <div class="who">执行者：<b>scripts</b> · ffmpeg + Pillow</div>
+      <pre><code># 单个视频
+CATVA extract --video /path/to/clip.mp4 --context litter_box --date 2026-06-11
+
+# 一次并行处理当天所有视频（更快）
+CATVA batch-extract --date 2026-06-11</code></pre>
+      <p>调 ffmpeg 的 <code>fps=1/interval</code> 滤镜均匀抽帧，
+      <code>frame_ts</code> = 视频起始时间 + 帧偏移，由脚本算好，agent 不用自己算。</p>
+      <h4>降采样 <span class="status done">✅ 已实现</span></h4>
+      <p>ffmpeg <code>-vf</code> 同时挂 <code>scale='min(768,iw)':-2</code>，抽出的代表帧长边 ≤ 768px。
+      单帧 token 从 ~2700（1080p）降到 ~440——这是除预筛外的第二大杠杆（6 倍）。尺寸由配置项
+      <code>processing.frame_max_side</code> 控制（默认 768）。768 在 1 tile 内、留足识别虎斑条纹
+      与「鼻尖靠近食碗」的证据细节；不建议降到 480p，会牺牲识别精度。</p>
+      <h4>采样间隔按 context 分段 <span class="status done">✅ 已实现</span></h4>
+      <p>配置项 <code>frame_interval_seconds</code> 从单一值改为按 context 分段表：</p>
+      <pre><code>[processing]
+frame_interval_seconds.litter_box = 6   # 猫砂盆：救黑猫 &lt;24s 快速进出
+frame_interval_seconds.feeder     = 12  # 喂食机：吃饭是长活动，12s 足够</code></pre>
+      <p>向后兼容：读到单一整数则两个 context 都用它（老配置不破）。6s 间隔下猫砂盆活跃段抽 10 帧，
+      &lt;24s 的快速进出能命中 3–4 帧而非 0–1 帧，配合 <code>min_frames</code> 降到 1（见聚合规则）消除结构性漏检。</p>
+      <p>相邻、画面几乎相同的帧会被合并（dHash 汉明距离 ≤ 阈值），每组只留一个<strong>代表帧</strong>，
+      附带 <code>time_range</code>（覆盖时段）和 <code>represents</code>（代表了几帧）。</p>
+      <div class="callout warn2">⚠️ 去重省的是<strong>帧数</strong>，不是每帧 token。在预筛+降采样落地前，dedup 是唯一省 token 的手段，但对连续录像的量级问题杯水车薪——见上方 token 账。</div>
+      <div class="callout warn">去重需 Pillow（<code>pip install pillow</code>）。未装时输出全部帧（无 <code>time_range</code>），流程不变，只是不省 token。可用 <code>CATVA doctor</code> 检查。</div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="step s3" id="step3">
+    <div class="num">3</div>
+    <div class="body">
+      <h4>识别每张代表帧 ⬅ 核心步骤</h4>
+      <div class="who">执行者：<b>agent</b> · 自身多模态读图能力 · 不调脚本不调 API</div>
+      <p>对返回的每个代表帧，用读图能力打开 <code>frame_path</code>，按
+      <code>references/recognition-protocol.md</code> 判断：</p>
+      <ul>
+        <li><strong>有哪些猫</strong>：<span class="chip tabby">tabby</span> 虎斑条纹 + 额头 M 花纹 · <span class="chip black">black</span> 全身黑无花纹 · 无法确定填 <code>unknown</code> · 无猫返回 <code>[]</code></li>
+        <li><strong>在做什么</strong>：<span class="pill eat">eating</span> <span class="pill toi">toileting</span> <span class="pill idle">idle</span> <span class="pill abs">absent</span>（仅当画面完全无猫）</li>
+      </ul>
+      <table>
+        <tr><th>context</th><th>算 toileting</th><th>算 eating</th><th>否则</th></tr>
+        <tr><td><code>litter_box</code> 猫砂盆</td><td>刨沙 / 蹲伏砂盆内 / 进出砂盆</td><td><span class="pill idle">不可能 → idle</span></td><td>idle（路过/休息）/ absent</td></tr>
+        <tr><td><code>feeder</code> 喂食机</td><td><span class="pill idle">不可能 → idle</span></td><td>低头 / 鼻尖嘴靠近食碗出粮口 / 咀嚼</td><td>idle / absent</td></tr>
+      </table>
+      <div class="callout warn2">路径级硬约束：猫砂盆画面里不会真正进食，喂食机画面里不会真正如厕。识别时就应正确归类（ingest 阶段还有代码兜底）。</div>
+      <p>对每帧产出一个 JSON 对象（带 <code>time_range</code> 的要<strong>原样回传</strong>，
+      ingest 会按采样间隔扩展为整段）：<code>activity.evidence</code> 必须填一句话引用画面细节，
+      它逼你看图而非猜，也会写进最终报告供主人抽查。</p>
+      <div class="callout">批量识别省往返：一个视频通常只剩 2-3 个代表帧，建议一次打开全部代表帧、一次性输出 JSON 数组。</div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="step s4" id="step4">
+    <div class="num">4</div>
+    <div class="body">
+      <h4>ingest · 把识别结果写回</h4>
+      <div class="who">执行者：<b>scripts</b> · 校验 + 扩展 + 落盘 + 标记</div>
+      <pre><code>CATVA ingest \
+  --video /path/to/clip.mp4 \
+  --date 2026-06-11 \
+  --results '[{"frame_ts":"...","context":"litter_box","cats":[{"identity":"black","confidence":0.9}],"activity":{"type":"toileting","evidence":"..."},"time_range":["...","..."]}]'</code></pre>
+      <p><code>--results</code> 也支持 <code>@文件路径</code>。ingest 会：</p>
+      <ol>
+        <li>校验每条结果字段合法性（<code>schema.validate_frame_result</code>）</li>
+        <li>应用路径级硬约束（猫砂盆的 <code>eating</code> → <code>idle</code>，反之亦然）</li>
+        <li>带 <code>time_range</code> 的结果按采样间隔<strong>扩展为整段内多个时间点</strong>写入 <code>raw/日期.jsonl</code></li>
+        <li>把该视频标记为已处理（<code>mark_processed</code>）—— 只有这步成功才标记</li>
+      </ol>
+      <p>对 <code>motion_videos</code>（预筛后）里每个文件重复第 2–4 步（或用 <code>batch-extract</code> 一次抽完，再逐个 ingest）。未启用预筛时退化为对 <code>todo</code> 全量处理。</p>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="step s5" id="step5">
+    <div class="num">5</div>
+    <div class="body">
+      <h4>report · 生成报告</h4>
+      <div class="who">执行者：<b>scripts</b> · 从 jsonl 重聚合，零识别开销</div>
+      <pre><code>CATVA report --date 2026-06-11</code></pre>
+      <p>读 <code>raw/日期.jsonl</code> 里<strong>当天全部帧</strong>（跨视频文件全局聚合），
+      生成 <code>reports_dir/2026-06-11.md</code>。报告含：汇总（吃饭/上厕所总次数）、
+      每只猫小节（tabby → black → unknown 固定顺序）、按时间排列的事件时间线（含证据摘要）。</p>
+      <div class="callout">报告是 jsonl 的纯函数渲染。改了报告格式想重出？直接再跑 <code>report</code>，不消耗任何识别（读图）开销，秒出。</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- 命令速查 -->
+<section id="commands">
+<h2>命令速查</h2>
+<p>下表中 <code>CATVA</code> = <code>python3 "${CLAUDE_PLUGIN_ROOT}/skills/cat-video-analyzer/scripts/catva.py"</code>。
+所有命令均已实现。</p>
+<table>
+  <tr><th>命令</th><th>作用</th><th>状态</th></tr>
+  <tr><td><code>CATVA doctor</code></td><td>检查 Python / ffmpeg / 配置 / Pillow 是否就绪</td><td><span class="status done">✅</span></td></tr>
+  <tr><td><code>CATVA scan --date D [--force]</code></td><td>列出日期 D 的待处理视频（已去重）</td><td><span class="status done">✅</span></td></tr>
+  <tr><td><code>CATVA prefilter --date D [--recheck-silent]</code></td><td>批量运动检测预筛，砍掉无运动段，输出有运动段清单</td><td><span class="status done">✅</span></td></tr>
+  <tr><td><code>CATVA extract --video V --context C [--date D]</code></td><td>抽帧 + 降采样 + 去重，输出代表帧（含 time_range）</td><td><span class="status done">✅</span></td></tr>
+  <tr><td><code>CATVA batch-extract --date D</code></td><td>并行抽帧 + 降采样 + 去重（当天所有待处理视频）</td><td><span class="status done">✅</span></td></tr>
+  <tr><td><code>CATVA ingest --video V --date D --results R</code></td><td>写入识别结果（自动按 time_range 扩展）+ 标记已处理</td><td><span class="status done">✅</span></td></tr>
+  <tr><td><code>CATVA report --date D</code></td><td>聚合 + 生成 Markdown 报告</td><td><span class="status done">✅</span></td></tr>
+</table>
+</section>
+
+<!-- 数据布局 -->
+<section id="data">
+<h2>持久化数据布局</h2>
+<div class="tree">
+<span class="c">~/.config/cat-video-analyzer/</span>  <span class="c">(Windows: %APPDATA%\cat-video-analyzer\)</span>
+├── <span class="f">config.toml</span>          <span class="c">用户配置（NAS 目录、去重参数、时区）</span>
+├── <span class="f">state.json</span>           <span class="c">已处理文件指纹（增量去重核心）</span>
+├── <span class="f">state.json.lock</span>      <span class="c">文件锁哨兵</span>
+└── <span class="d">raw/</span>
+    └── <span class="f">2026-06-11.jsonl</span>  <span class="c">当天所有帧的识别结果（每行一帧 JSON）</span>
+</div>
+<ul>
+  <li><code>state.json</code> 只存指纹 → 体积小、加载快。<code>scan</code> 用它跳过已识别文件。</li>
+  <li><code>raw/*.jsonl</code> 存逐帧结果 → 按日分割、可独立重聚合。<code>report</code> 从它重聚合。</li>
+</ul>
+</section>
+
+<!-- 去重 -->
+<section id="dedup">
+<h2>增量去重 & 帧去重</h2>
+<h3>增量去重（scan 阶段，跨次运行）</h3>
+<p>用 <code>(mtime, size)</code> 而非内容哈希：NAS 上视频多，算 SHA 太慢；对“同名文件被覆盖”这类场景，
+mtime+size 已足够可靠，而内容哈希只在“文件原地编辑但大小时间不变”时才有优势——监控视频不会发生。</p>
+<p>状态文件损坏时自动备份 <code>.corrupt-*.json</code> 并重建空状态。</p>
+<h3>帧去重（extract 阶段，单视频内）</h3>
+<p>相邻帧用 dHash 计算汉明距离，≤ <code>dedup_hamming_threshold</code> 则合并为一个代表帧，
+覆盖 <code>time_range</code>。agent 只识别代表帧，ingest 按 time_range 把结果扩展回整段，
+聚合逻辑无需感知去重。</p>
+</section>
+
+<!-- 聚合 -->
+<section id="aggregate">
+<h2>事件聚合规则</h2>
+<p>把“逐帧识别结果”变成“行为事件”，实现见 <code>scripts/aggregate.py</code>：</p>
+<ol>
+  <li><strong>跳过无效帧</strong>：<code>idle</code>/<code>absent</code> 不参与事件，但会打断连续段。</li>
+  <li><strong>连续段切分</strong>：相同 activity.type 连续归入同段，类型变化开新段。</li>
+  <li><strong>跨段间隔合并</strong>：两个同类型段，若后段首帧 − 前段末帧 ≤ <code>event_merge_gap_seconds</code>（默认 30s）合并。30 秒容忍窗口吸收“猫低头吃粮某帧被识别成 idle”的噪声，又不会把两次独立行为误并。</li>
+  <li><strong>最短帧数过滤</strong>：合并后段帧数 &lt; <code>min_frames</code> 丢弃——单帧活动太可能是误判。
+  <span class="status done">✅ 已实现</span>：<code>min_frames</code> 按 context 分段，猫砂盆 = 1、喂食机 = 2（见下）。</li>
+  <li><strong>参与猫的判定</strong>：事件内每帧 cats 投票，取出现频次最高的 identity；并列取置信度最高；全无则 <code>unknown</code>。</li>
+</ol>
+<div class="callout warn2"><strong>黑猫快速进出砂盆的系统性漏检</strong> <span class="status done">✅ 已实现</span>：黑猫有 &lt; 24s 快速进出砂盆的行为。12s 采样间隔下，这种活动最多横跨 2 个采样点、极可能只命中 1 帧甚至 0 帧，被 <code>min_frames=2</code> 直接丢弃——每次都漏。解法（与采样间隔分段配套）：猫砂盆 context 采样间隔收到 6s（10 帧/段，&lt;24s 活动能命中 3–4 帧），并把猫砂盆 <code>min_frames</code> 降到 1 兜底。预筛先砍掉 85% 无运动段，是 6s 间隔帧数不失控的前提。</div>
+<div class="callout"><strong>为什么跨视频聚合</strong>：1 分钟视频是人为切片，猫的真实行为不关心文件边界。
+<code>run.py</code> 把当天所有帧写入同一个 <code>raw/YYYY-MM-DD.jsonl</code>，聚合统一读取，
+所以跨文件的“14:29:58 - 14:31:14 吃饭”能正确合并成一次。</div>
+</section>
+
+<!-- 原则 -->
+<section id="principles">
+<h2>核心原则</h2>
+<ol>
+  <li><strong>token 由两个正交维度决定</strong>：送多少帧 × 每帧多大。预筛砍段数（最大杠杆）、降采样砍每帧 token（6×）、分段采样救黑猫漏检、dHash 去重省帧数——四者咬合。详见上方 <a href="#token">token 消耗账</a>。</li>
+  <li><strong>绝不重复识别</strong>。<code>scan</code> 只返回未处理文件；<code>ingest</code> 处理完即标记；预筛的 <code>silent</code> 段也标记。这是定时启用的前提。</li>
+  <li><strong>预筛不破坏数据</strong>。无运动段静默跳过、不写 jsonl（<code>absent</code> 帧本就不参与事件），但必须标记 <code>silent</code> 避免下次重列。</li>
+  <li><strong>跨平台</strong>。路径走 pathlib，不硬编码挂载点，支持 macOS / Linux / WSL / Windows。</li>
+  <li><strong>失败可重入</strong>。单个视频任何一步失败都不标记为已处理，下次 scan 会重试。</li>
+  <li><strong>识别精度优先</strong>。宁可保守（过渡帧算 idle），也不要把噪声混进事件——聚合阶段 30 秒间隔容忍会补回短中断。</li>
+</ol>
+</section>
+
+<!-- 失败 -->
+<section id="failure">
+<h2>失败与重试</h2>
+<table>
+  <tr><th>失败点</th><th>行为</th></tr>
+  <tr><td>extract 失败</td><td>不标记已处理；下次 scan 会重新列入 todo</td></tr>
+  <tr><td>识别时某帧判断不了</td><td>agent 可对该帧填 <code>idle</code>/<code>unknown</code>，或整帧不写入 results</td></tr>
+  <tr><td>ingest 校验失败</td><td>该条被拒（返回 errors），其余正常写入；视频整体仍标记已处理</td></tr>
+  <tr><td>状态文件损坏</td><td>自动备份 <code>.corrupt-*.json</code> 并重建空状态</td></tr>
+  <tr><td>ffmpeg 缺失</td><td>报错并提示安装方式（macOS brew / Linux apt / Windows winget）</td></tr>
+</table>
+</section>
+
+<!-- 定时 -->
+<section id="schedule">
+<h2>定时触发</h2>
+<p>本 skill 的执行者是 agent，所以“定时启用” = 定时触发 agent：</p>
+<ul>
+  <li><strong>Claude Code</strong>：用 cron / 任务计划调 <code>claude -p "用 cat-video-analyzer 分析昨天的猫咪视频"</code></li>
+  <li><strong>OpenCode / Codex</strong>：各自的非交互 / 定时模式</li>
+  <li>触发后 agent 读 <code>SKILL.md</code>，自动从 scan 走到 report</li>
+</ul>
+<div class="callout">因为 scan 自带增量去重，即使 cron 重叠或补跑也不会重复识别。</div>
+</section>
+
+<footer>
+  本文档由 <code>cat-video-analyzer</code> 的 <code>SKILL.md</code> 与
+  <code>references/</code> 整理而成，对应脚本位于 <code>scripts/</code>。
+  权威定义仍以各 markdown 文档为准。
+</footer>
+</main>
+</div>
+</body>
+</html>
